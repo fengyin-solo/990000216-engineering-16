@@ -100,35 +100,31 @@ const stats = reactive({
 const recentArticles = ref([])
 
 onMounted(() => {
-  fetchStats()
   fetchRecentArticles()
+  fetchTagCount()
 })
 
-async function fetchStats() {
+async function fetchTagCount() {
   try {
-    const [articlesRes, tagsRes] = await Promise.all([
-      api.get('/articles', { params: { page: 1, limit: 1000 } }),
-      api.get('/tags')
-    ])
-    
-    stats.totalArticles = articlesRes.data.pagination.total
+    const tagsRes = await api.get('/tags')
     stats.totalTags = tagsRes.data.tags.length
-    
-    // Calculate articles from this week
-    const oneWeekAgo = new Date()
-    oneWeekAgo.setDate(oneWeekAgo.getDate() - 7)
-    stats.recentArticles = articlesRes.data.articles.filter(
-      a => new Date(a.created_at) > oneWeekAgo
-    ).length
   } catch (error) {
-    console.error('Failed to fetch stats:', error)
+    console.error('Failed to fetch tags:', error)
   }
 }
 
 async function fetchRecentArticles() {
   try {
-    const response = await api.get('/articles', { params: { page: 1, limit: 5 } })
+    const response = await api.get('/articles', { params: { page: 1, limit: 100 } })
     recentArticles.value = response.data.articles
+    stats.totalArticles = response.data.pagination.total
+
+    // Calculate articles from this week
+    const oneWeekAgo = new Date()
+    oneWeekAgo.setDate(oneWeekAgo.getDate() - 7)
+    stats.recentArticles = response.data.articles.filter(
+      a => new Date(a.created_at) > oneWeekAgo
+    ).length
   } catch (error) {
     console.error('Failed to fetch recent articles:', error)
   }

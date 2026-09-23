@@ -1,20 +1,14 @@
 const initDb = require('./init');
 const { getDb } = require('./init');
-const path = require('path');
-const fs = require('fs');
 
-// Ensure data directory exists
-const dataDir = path.join(__dirname, '..', 'data');
-if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true });
-}
-
-// Initialize database (create tables)
+// Initialize database (creates the directory and tables if needed)
 initDb();
 const db = getDb();
 
-// Clear existing articles
+// Clear existing articles and reset the autoincrement counter so seed runs
+// always produce the same ids (1..N), which keeps verification reproducible.
 db.exec('DELETE FROM articles');
+db.exec("DELETE FROM sqlite_sequence WHERE name = 'articles'");
 
 const articles = [
   {
@@ -823,6 +817,6 @@ const articlesWithDates = articles.map((article, index) => ({
 
 insertMany(articlesWithDates);
 
-console.log(`Seeded ${articles.length} articles successfully`);
+console.log(`Seeded ${articles.length} articles successfully into ${require('./init').DB_PATH}`);
 
 db.close();

@@ -76,6 +76,26 @@ cd ../backend
 npm run seed
 ```
 
+This loads 15 sample articles and resets their ids to `1..15`, so the data
+is identical on every run.
+
+### Verifying the article query API (reproducible)
+
+A self-contained verification script covers pagination, tag filtering,
+search, empty results and illegal parameter combinations, plus the shared
+list/tag response contract and detail-endpoint compatibility:
+
+```bash
+cd backend
+npm run verify
+```
+
+The script boots the **real** Express server against an isolated temporary
+SQLite database (it never touches `backend/data/blog.db`), runs all checks
+over HTTP, then shuts the server down and deletes every temporary file.
+Repeated runs leave no test records behind. Use `PORT=3200 npm run verify`
+if the default port (3101) is busy.
+
 ### Running the Application
 
 1. **Start the backend server (port 3001)**
@@ -111,13 +131,57 @@ The frontend will be available at `http://localhost:5173`
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
+| GET | `/api/health` | Readiness probe (port, database, sample data) | No |
 | POST | `/api/auth/login` | Admin login | No |
-| GET | `/api/articles` | List articles (with pagination and tag filter) | No |
+| GET | `/api/articles` | List articles (pagination, tag filter, search) | No |
+| GET | `/api/articles/tags` | Tag summary (same contract as the list) | No |
+| GET | `/api/tags` | Alias of `/api/articles/tags` | No |
 | GET | `/api/articles/:id` | Get single article | No |
 | POST | `/api/articles` | Create new article | Yes |
 | PUT | `/api/articles/:id` | Update article | Yes |
 | DELETE | `/api/articles/:id` | Delete article | Yes |
-| GET | `/api/tags` | Get all unique tags | No |
+
+### Startup checks
+
+On boot the server prints an explicit checklist showing whether the port is
+listening, whether the SQLite database file is present/connected and whether
+sample data is loaded (with a hint to run `npm run seed` when empty). The same
+information is available at any time via `GET /api/health`.
+
+### Response contract
+
+List/tag **collection** endpoints share one envelope:
+
+```json
+{
+  "success": true,
+  "data": [ ... ],
+  "meta": { "pagination": { "total": 15, "page": 1, "limit": 10, "totalPages": 2 },
+            "filters": { "tag": null, "search": null } }
+}
+```
+
+(`GET /api/tags` returns the same envelope with `meta: { count }`.) Errors use
+`{ "success": false, "error": { "code", "message" } }` — illegal query
+parameters (non-positive/non-numeric `page` or `limit`, `limit` over 100,
+repeated keys, overlong filters) return `400`. Out-of-range pages and
+no-match filters return `200` with an empty `data` array. The frontend Axios
+client flattens this envelope, so views still consume `articles` /
+`pagination` / `tags` exactly as before.
+
+The **single-article** detail endpoints keep returning the bare article
+object (`id`, `title`, `body`, `summary`, `tags`, `created_at`, `updated_at`)
+without an envelope, to stay compatible with the existing detail page and
+admin editor.
+
+### Article list query parameters
+
+| Parameter | Rules |
+|-----------|-------|
+| `page` | Positive integer, default `1` |
+| `limit` | Positive integer, default `10`, maximum `100` |
+| `tag` | Exact tag match (e.g. `?tag=JavaScript`); blank values are ignored |
+| `search` | Matches title or summary; `%`/`_` wildcards are escaped |
 
 ## Admin Credentials
 
@@ -130,7 +194,8 @@ The frontend will be available at `http://localhost:5173`
 
 - Server port: `3001` (configurable via `PORT` environment variable)
 - JWT secret: `blog-platform-secret-key` (hardcoded in middleware/auth.js)
-- Database file: `backend/data/blog.db`
+- Database file: `backend/data/blog.db` (overridable via `DB_PATH`; the
+  verification script uses this to isolate its temporary database)
 
 ### Frontend
 
