@@ -1,34 +1,35 @@
-const express = require('express');
-const cors = require('cors');
-const path = require('path');
 const initDb = require('./db/init');
-const articlesRouter = require('./routes/articles');
-const authRouter = require('./routes/auth');
+const { getDb, getDbPath } = require('./db/init');
+const { createApp } = require('./app');
 
-const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Initialize database
+// 启动检查：先确认数据库与示例数据是否就绪，再监听端口
 initDb();
+const db = getDb();
+const articleCount = db.prepare('SELECT COUNT(*) AS count FROM articles').get().count;
 
-// Middleware
-app.use(cors());
-app.use(express.json());
+const app = createApp();
 
-// Routes
-app.use('/api/auth', authRouter);
-app.use('/api/articles', articlesRouter);
-
-// Tags route
-const { getTags } = require('./routes/articles');
-app.get('/api/tags', getTags);
-
-// Error handling
-app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(500).json({ error: 'Internal server error' });
+const server = app.listen(PORT, () => {
+  console.log('--- 启动检查 ---');
+  console.log(`[端口] 服务已就绪: http://localhost:${PORT}`);
+  console.log(`[数据库] ${getDbPath()}`);
+  if (articleCount > 0) {
+    console.log(`[示例数据] 已就绪：${articleCount} 篇文章`);
+  } else {
+    console.warn('[示例数据] 为空，请先运行 npm run seed');
+  }
+  console.log('----------------');
+  console.log('Server running on port', PORT);
 });
 
-app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
-});
+function shutdown() {
+  server.close(() => {
+    db.close();
+    process.exit(0);
+  });
+}
+
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);

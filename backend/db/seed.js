@@ -1,21 +1,8 @@
 const initDb = require('./init');
-const { getDb } = require('./init');
-const path = require('path');
-const fs = require('fs');
 
-// Ensure data directory exists
-const dataDir = path.join(__dirname, '..', 'data');
-if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true });
-}
-
-// Initialize database (create tables)
-initDb();
-const db = getDb();
-
-// Clear existing articles
-db.exec('DELETE FROM articles');
-
+// 示例数据：供本地开发与验证环境复用。
+// 直接执行本文件（npm run seed）时写入默认开发库；
+// 被验证脚本调用时通过 BLOG_DB_PATH 写入临时库。
 const articles = [
   {
     title: 'JavaScript ES6+ 新特性详解',
@@ -615,7 +602,7 @@ app.use(errorHandler);
 const authenticate = (req, res, next) => {
   const token = req.headers.authorization;
   if (!token) return res.status(401).json({ error: 'Unauthorized' });
-  
+
   try {
     req.user = verifyToken(token);
     next();
@@ -676,11 +663,11 @@ export const useCounterStore = defineStore('counter', {
 export const useUserStore = defineStore('user', () => {
   const user = ref(null);
   const isLoggedIn = computed(() => !!user.value);
-  
+
   function login(credentials) {
     // ...
   }
-  
+
   return { user, isLoggedIn, login };
 });
 \`\`\`
@@ -802,27 +789,47 @@ Vite 是现代前端开发的最佳构建工具选择。`,
   }
 ];
 
-const insertStmt = db.prepare(`
-  INSERT INTO articles (title, body, summary, tags, created_at, updated_at)
-  VALUES (@title, @body, @summary, @tags, @created_at, @updated_at)
-`);
+/**
+ * 重置并写入示例数据，可安全重复执行。
+ * @returns {number} 写入的文章数量
+ */
+function seedDatabase() {
+  const db = initDb();
 
-const insertMany = db.transaction((articles) => {
-  for (const article of articles) {
-    insertStmt.run(article);
-  }
-});
+  const insertStmt = db.prepare(`
+    INSERT INTO articles (title, body, summary, tags, created_at, updated_at)
+    VALUES (@title, @body, @summary, @tags, @created_at, @updated_at)
+  `);
 
-// Add timestamps to each article
-const now = new Date();
-const articlesWithDates = articles.map((article, index) => ({
-  ...article,
-  created_at: new Date(now.getTime() - (15 - index) * 86400000).toISOString(),
-  updated_at: new Date(now.getTime() - (15 - index) * 86400000).toISOString()
-}));
+  const insertMany = db.transaction((rows) => {
+    // 清空并重置自增序列，保证每次执行后示例数据一致，且不残留任何旧记录
+    db.exec('DELETE FROM articles');
+    db.exec("DELETE FROM sqlite_sequence WHERE name = 'articles'");
+    for (const article of rows) {
+      insertStmt.run(article);
+    }
+  });
 
-insertMany(articlesWithDates);
+  const now = new Date();
+  const articlesWithDates = articles.map((article, index) => ({
+    ...article,
+    created_at: new Date(now.getTime() - (articles.length - index) * 86400000).toISOString(),
+    updated_at: new Date(now.getTime() - (articles.length - index) * 86400000).toISOString()
+  }));
 
-console.log(`Seeded ${articles.length} articles successfully`);
+  insertMany(articlesWithDates);
 
-db.close();
+  return articles.length;
+}
+
+module.exports = { articles, seedDatabase };
+
+// 直接运行：npm run seed
+if (require.main === module) {
+  const { getDbPath, closeDb } = require('./init');
+  const dbPath = getDbPath();
+  const count = seedDatabase();
+  closeDb();
+
+  console.log(`Seeded ${count} articles successfully at ${dbPath}`);
+}

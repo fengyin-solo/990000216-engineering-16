@@ -1,67 +1,101 @@
 const express = require('express');
 const { getDb } = require('../db/init');
 const { authenticateToken } = require('../middleware/auth');
+const {
+  sendCollection,
+  sendItem,
+  sendError,
+  parseTags,
+  escapeLike
+} = require('../utils/response');
 
 const router = express.Router();
 
-// GET /api/articles - List articles with pagination, tag filter and search
+const DEFAULT_LIMIT = 10;
+const MAX_LIMIT = 100;
+
+// 校验正整数查询参数：缺省时使用默认值；非法（0、负数、小数、非数字）直接判为非法参数
+function parsePositiveInt(rawValue, defaultValue, { max } = {}) {
+  if (rawValue === undefined) return { value: defaultValue };
+  if (!/^\d+$/.test(String(rawValue).trim())) return { invalid: true };
+
+  const value = Number(rawValue);
+  if (value < 1) return { invalid: true };
+  if (max !== undefined && value > max) return { invalid: true };
+
+  return { value };
+}
+
+// GET /api/articles - 文章列表，支持分页、标签过滤与标题/摘要搜索
 router.get('/', (req, res) => {
   const db = getDb();
-  const page = parseInt(req.query.page) || 1;
-  const limit = parseInt(req.query.limit) || 10;
-  const tag = req.query.tag || null;
-  const search = req.query.search || null;
+
+  // 非法参数组合统一返回 400，而不是落入 SQL 报错（如负数 OFFSET）
+  const pageResult = parsePositiveInt(req.query.page, 1);
+  if (pageResult.invalid) {
+    return sendError(res, 400, 'Invalid query parameter: page must be a positive integer');
+  }
+  const limitResult = parsePositiveInt(req.query.limit, DEFAULT_LIMIT, { max: MAX_LIMIT });
+  if (limitResult.invalid) {
+    return sendError(res, 400, `Invalid query parameter: limit must be an integer between 1 and ${MAX_LIMIT}`);
+  }
+
+  const page = pageResult.value;
+  const limit = limitResult.value;
+  const tag = typeof req.query.tag === 'string' ? req.query.tag.trim() : '';
+  const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
   const offset = (page - 1) * limit;
 
-  let countQuery, articlesQuery;
-  let params = [];
-  let countParams = [];
-  let whereClauses = [];
+  const whereClauses = [];
+  const params = [];
+  const countParams = [];
 
   if (tag) {
-    whereClauses.push(`',' || tags || ',' LIKE ?`);
-    params.push(`%,${tag},%`);
-    countParams.push(`%,${tag},%`);
+    // 逗号包裹后做完整标签匹配，避免前缀误匹配；转义用户输入中的 LIKE 通配符
+    whereClauses.push(`(',' || tags || ',') LIKE ? ESCAPE '\\'`);
+    const tagPattern = `%,${escapeLike(tag)},%`;
+    params.push(tagPattern);
+    countParams.push(tagPattern);
   }
 
   if (search) {
-    whereClauses.push(`(title LIKE ? OR summary LIKE ?)`);
-    const searchTerm = `%${search}%`;
-    params.push(searchTerm, searchTerm);
-    countParams.push(searchTerm, searchTerm);
+    whereClauses.push(`(title LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\')`);
+    const searchPattern = `%${escapeLike(search)}%`;
+    params.push(searchPattern, searchPattern);
+    countParams.push(searchPattern, searchPattern);
   }
 
   const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
-
-  countQuery = `SELECT COUNT(*) as total FROM articles ${whereSql}`;
-  articlesQuery = `SELECT id, title, summary, tags, created_at, updated_at FROM articles ${whereSql} ORDER BY created_at DESC LIMIT ? OFFSET ?`;
+  const countQuery = `SELECT COUNT(*) AS total FROM articles ${whereSql}`;
+  const listQuery = `
+    SELECT id, title, summary, tags, created_at, updated_at
+    FROM articles ${whereSql}
+    ORDER BY created_at DESC, id DESC
+    LIMIT ? OFFSET ?
+  `;
   params.push(limit, offset);
 
   try {
     const { total } = db.prepare(countQuery).get(...countParams);
-    const articles = db.prepare(articlesQuery).all(...params);
+    const rows = db.prepare(listQuery).all(...params);
 
-    const parsedArticles = articles.map(article => ({
-      ...article,
-      tags: article.tags ? article.tags.split(',').map(t => t.trim()) : []
+    const articles = rows.map(article => ({
+      id: article.id,
+      title: article.title,
+      summary: article.summary,
+      tags: parseTags(article.tags),
+      created_at: article.created_at,
+      updated_at: article.updated_at
     }));
 
-    res.json({
-      articles: parsedArticles,
-      pagination: {
-        total,
-        page,
-        limit,
-        totalPages: Math.ceil(total / limit)
-      }
-    });
+    sendCollection(res, 'articles', articles, { total, page, limit });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: 'Failed to fetch articles' });
+    sendError(res, 500, 'Failed to fetch articles');
   }
 });
 
-// GET /api/articles/:id - Get single article
+// GET /api/articles/:id - 文章详情（保持现有前端依赖的扁平字段结构，包含 body）
 router.get('/:id', (req, res) => {
   const db = getDb();
   const { id } = req.params;
@@ -70,26 +104,26 @@ router.get('/:id', (req, res) => {
     const article = db.prepare('SELECT * FROM articles WHERE id = ?').get(id);
 
     if (!article) {
-      return res.status(404).json({ error: 'Article not found' });
+      return sendError(res, 404, 'Article not found');
     }
 
-    res.json({
+    sendItem(res, {
       ...article,
-      tags: article.tags ? article.tags.split(',').map(t => t.trim()) : []
+      tags: parseTags(article.tags)
     });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: 'Failed to fetch article' });
+    sendError(res, 500, 'Failed to fetch article');
   }
 });
 
-// POST /api/articles - Create article (requires auth)
+// POST /api/articles - 创建文章（需要鉴权）
 router.post('/', authenticateToken, (req, res) => {
   const db = getDb();
   const { title, body, summary, tags } = req.body;
 
   if (!title || !body) {
-    return res.status(400).json({ error: 'Title and body are required' });
+    return sendError(res, 400, 'Title and body are required');
   }
 
   try {
@@ -103,30 +137,30 @@ router.post('/', authenticateToken, (req, res) => {
 
     const article = db.prepare('SELECT * FROM articles WHERE id = ?').get(result.lastInsertRowid);
 
-    res.status(201).json({
+    sendItem(res, {
       ...article,
-      tags: article.tags ? article.tags.split(',').map(t => t.trim()) : []
-    });
+      tags: parseTags(article.tags)
+    }, 201);
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: 'Failed to create article' });
+    sendError(res, 500, 'Failed to create article');
   }
 });
 
-// PUT /api/articles/:id - Update article (requires auth)
+// PUT /api/articles/:id - 更新文章（需要鉴权）
 router.put('/:id', authenticateToken, (req, res) => {
   const db = getDb();
   const { id } = req.params;
   const { title, body, summary, tags } = req.body;
 
   if (!title || !body) {
-    return res.status(400).json({ error: 'Title and body are required' });
+    return sendError(res, 400, 'Title and body are required');
   }
 
   try {
     const existing = db.prepare('SELECT * FROM articles WHERE id = ?').get(id);
     if (!existing) {
-      return res.status(404).json({ error: 'Article not found' });
+      return sendError(res, 404, 'Article not found');
     }
 
     const tagsStr = Array.isArray(tags) ? tags.join(',') : (tags || '');
@@ -139,17 +173,17 @@ router.put('/:id', authenticateToken, (req, res) => {
 
     const article = db.prepare('SELECT * FROM articles WHERE id = ?').get(id);
 
-    res.json({
+    sendItem(res, {
       ...article,
-      tags: article.tags ? article.tags.split(',').map(t => t.trim()) : []
+      tags: parseTags(article.tags)
     });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: 'Failed to update article' });
+    sendError(res, 500, 'Failed to update article');
   }
 });
 
-// DELETE /api/articles/:id - Delete article (requires auth)
+// DELETE /api/articles/:id - 删除文章（需要鉴权）
 router.delete('/:id', authenticateToken, (req, res) => {
   const db = getDb();
   const { id } = req.params;
@@ -157,41 +191,15 @@ router.delete('/:id', authenticateToken, (req, res) => {
   try {
     const existing = db.prepare('SELECT * FROM articles WHERE id = ?').get(id);
     if (!existing) {
-      return res.status(404).json({ error: 'Article not found' });
+      return sendError(res, 404, 'Article not found');
     }
 
     db.prepare('DELETE FROM articles WHERE id = ?').run(id);
     res.json({ message: 'Article deleted successfully' });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: 'Failed to delete article' });
+    sendError(res, 500, 'Failed to delete article');
   }
 });
 
-// GET /api/tags - Get all unique tags (exported for use in server.js)
-function getTags(req, res) {
-  const db = getDb();
-
-  try {
-    const articles = db.prepare('SELECT tags FROM articles WHERE tags IS NOT NULL AND tags != ""').all();
-    const tagSet = new Set();
-
-    articles.forEach(article => {
-      if (article.tags) {
-        article.tags.split(',').forEach(tag => {
-          const trimmed = tag.trim();
-          if (trimmed) tagSet.add(trimmed);
-        });
-      }
-    });
-
-    const tags = Array.from(tagSet).sort();
-    res.json({ tags });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to fetch tags' });
-  }
-}
-
 module.exports = router;
-module.exports.getTags = getTags;
